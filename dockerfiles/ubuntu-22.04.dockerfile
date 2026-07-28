@@ -1,4 +1,10 @@
 ARG BASE_IMAGE=ubuntu:22.04
+ARG GO_VERSION=1.26.3
+ARG KUBECTL_VERSION=1.36.1
+ARG GIT_LFS_VERSION=3.7.1
+ARG GO_CRYPTO_VERSION=v0.52.0
+ARG GO_NET_VERSION=v0.55.0
+
 FROM ${BASE_IMAGE} AS base_build
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -29,6 +35,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /hpcc-dev
 RUN chmod -R 777 /hpcc-dev
+
+FROM base_build AS go_build
+
+ARG GO_VERSION
+
+RUN set -eux; \
+	curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o go.tar.gz; \
+	tar -C /usr/local -xzf go.tar.gz; \
+	rm go.tar.gz; \
+	/usr/local/go/bin/go version
+
+FROM go_build AS go_tools_build
+
+ARG KUBECTL_VERSION
+ARG GIT_LFS_VERSION
+ARG GO_CRYPTO_VERSION
+ARG GO_NET_VERSION
+
+# Build Kubernetes kubectl
+RUN set -eux; \
+	git clone --depth 1 --branch "v${KUBECTL_VERSION}" https://github.com/kubernetes/kubernetes.git /tmp/kubernetes-src; \
+	cd /tmp/kubernetes-src; \
+	GOPROXY=direct GOSUMDB=off GOWORK=off /usr/local/go/bin/go mod edit -require=golang.org/x/net@${GO_NET_VERSION}; \
+	GOPROXY=direct GOSUMDB=off GOWORK=off /usr/local/go/bin/go build -mod=mod -o /usr/local/bin/kubectl ./cmd/kubectl; \
+	test -x /usr/local/bin/kubectl; \
+	rm -rf /tmp/kubernetes-src
+
+# Build git-lfs
+RUN set -eux; \
+	git clone --depth 1 --branch "v${GIT_LFS_VERSION}" https://github.com/git-lfs/git-lfs.git /tmp/git-lfs; \
+	cd /tmp/git-lfs; \
+	GOPROXY=direct GOSUMDB=off /usr/local/go/bin/go mod edit -require=golang.org/x/crypto@${GO_CRYPTO_VERSION} -require=golang.org/x/net@${GO_NET_VERSION}; \
+	GOPROXY=direct GOSUMDB=off /usr/local/go/bin/go mod tidy; \
+	GOPROXY=direct GOSUMDB=off /usr/local/go/bin/go build -o /usr/local/bin/git-lfs .; \
+	/usr/local/bin/git-lfs version | grep "git-lfs/${GIT_LFS_VERSION}"; \
+	rm -rf /root/go /tmp/git-lfs
 
 FROM base_build AS vcpkg_build
 
@@ -107,6 +149,11 @@ WORKDIR /hpcc-dev
 COPY --from=vcpkg_build /hpcc-dev/vcpkg_installed /hpcc-dev/vcpkg_installed
 COPY --from=vcpkg_build /hpcc-dev/tools/cmake/bin /usr/local/bin
 COPY --from=vcpkg_build /hpcc-dev/tools/cmake/share /usr/local/share
+COPY --from=go_tools_build /usr/local/bin/kubectl /usr/local/bin/kubectl
+COPY --from=go_tools_build /usr/local/bin/git-lfs /usr/local/bin/git-lfs
+COPY --from=go_build /usr/local/go /usr/local/go
+
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 ENTRYPOINT ["/bin/bash", "--login", "-c"]
 
